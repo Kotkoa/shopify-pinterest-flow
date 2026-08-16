@@ -2,7 +2,7 @@
 
 ## Статус
 
-**Gate 0 / capability preparation.** Defaults подтверждены. Независимый plan review завершён: полный publisher нельзя запускать до проверки одного живого Pin и измеримости перехода. Реализуются только безопасные локальные примитивы и read-only Buffer inspector.
+**Gate 0 / blocked by storefront access.** Defaults подтверждены. Buffer Pinterest channel и board обнаруживаются через API; импортировано 38 active + published товаров (114 вариантов), все 38 CDN images публичны. Product URLs сейчас перенаправляют на `/password`, поэтому живой Pin нельзя публиковать до открытия storefront или предоставления другого публичного домена.
 
 ## 1. Проверяемая гипотеза MVP
 

@@ -18,6 +18,8 @@ credentials.json
 
 # Local overrides and temporary state
 products.local.json
+products_export.csv
+*_products_export.csv
 published.local.json
 *.tmp
 .tmp/

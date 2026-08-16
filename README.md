@@ -4,7 +4,7 @@ Minimal, stage-gated automation for testing whether Pinterest Pins can drive mea
 
 ## Status
 
-**MVP Gate 0.** The full publisher is not implemented or production-ready. The repository currently contains validated queue/UTM primitives, state invariants, tests, and a read-only Buffer Pinterest inspector.
+**MVP Gate 0.** The full publisher is not implemented or production-ready. The repository contains 38 active published catalog products (114 planned variants), validated queue/UTM primitives, state invariants, tests, and a read-only Buffer Pinterest inspector. Live testing is blocked while product URLs redirect to the Shopify password page.
 
 The first MVP tests one path only:
 
