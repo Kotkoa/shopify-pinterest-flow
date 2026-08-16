@@ -1,0 +1,41 @@
+# Dependencies
+node_modules/
+
+# Build and coverage
+dist/
+coverage/
+*.tsbuildinfo
+
+# Environment and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+
+# Local overrides and temporary state
+products.local.json
+published.local.json
+*.tmp
+.tmp/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Editors and operating systems
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Test caches
+.nyc_output/
+.cache/
