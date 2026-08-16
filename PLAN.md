@@ -2,7 +2,7 @@
 
 ## Статус
 
-**Planning / repository preparation.** Реализация publisher ещё не начата. Этот документ фиксирует предварительную архитектуру MVP и должен быть подтверждён перед подключением реальных API.
+**Gate 0 / capability preparation.** Defaults подтверждены. Независимый plan review завершён: полный publisher нельзя запускать до проверки одного живого Pin и измеримости перехода. Реализуются только безопасные локальные примитивы и read-only Buffer inspector.
 
 ## 1. Проверяемая гипотеза MVP
 
@@ -32,6 +32,7 @@ shopify-pinterest-flow/
 ├── tests/
 │   └── pinterest.test.ts
 ├── products.json
+├── products.example.json
 ├── published.json
 ├── .env.example
 ├── .gitignore
@@ -117,6 +118,8 @@ Shopify credentials в MVP не нужны.
 ```json
 {
   "schemaVersion": 1,
+  "campaign": "pinterest_mvp",
+  "catalogFingerprint": "sha256-of-ordered-catalog",
   "pins": [
     {
       "pinId": "pin_001",
@@ -138,7 +141,7 @@ Shopify credentials в MVP не нужны.
 }
 ```
 
-`buffer_queued` означает, что Buffer принял Pin. Это ещё не подтверждение фактической публикации в Pinterest.
+`buffer_queued` означает, что Buffer принял Pin. Это ещё не подтверждение фактической публикации в Pinterest. `catalogFingerprint` замораживает ordered snapshot из `id`, `name`, `url` и `image`. При неопределённом результате Buffer сохраняется `buffer_outcome_unknown` с `attemptedAt`, но без обязательных `bufferPostId` и `queuedAt`.
 
 ## 6. Search intents
 
@@ -242,97 +245,134 @@ Workflow должен:
 - использовать Node.js 22 и `npm ci`;
 - иметь `permissions: contents: write` только для сохранения состояния;
 - использовать единый concurrency group с `cancel-in-progress: false`;
-- после успешного запуска коммитить только изменённый `published.json`;
+- после каждого принятого Buffer post атомарно обновлять локальный state;
+- коммитить изменённый `published.json` даже если следующий элемент batch завершился ошибкой, после чего сохранять исходный non-zero exit status;
 - не выводить секреты;
 - иметь timeout.
 
 GitHub cron может запускаться с задержкой. Реальное время публикации определяет расписание Buffer.
 
-## 11. Пошаговая реализация и критерии проверки
+## 11. MVP Gates и критерии проверки
 
-### Этап 1 — локальная детерминированная очередь
+### Gate 0 — capability and observability smoke test
 
-**Гипотеза:** система правильно выбирает следующий Pin и не повторяет записанные варианты.
+**Гипотеза:** конкретные аккаунты Kotkoa технически поддерживают путь Buffer → live Pinterest Pin → Shopify session, а результат можно измерить.
+
+Порядок:
+
+1. Read-only запросом проверить Buffer API key, Pinterest channel и доступные boards.
+2. Выбрать один реальный товар и публичный Shopify CDN image.
+3. Создать один Pin с вручную подготовленным текстом без OpenAI.
+4. Дождаться фактического появления Pin в Pinterest, а не только `buffer_queued`.
+5. Проверить board, изображение, title и destination URL живого Pin.
+6. Выполнить один маркированный технический переход.
+7. Проверить сохранение UTM после redirect и появление сессии в заранее выбранном Shopify report.
+8. Зафиксировать задержку появления данных и доступные dimensions.
+
+Для технического перехода использовать отдельную атрибуцию:
+
+```text
+utm_campaign=pinterest_technical_test
+utm_content=technical_pin_001
+```
+
+Этот переход исключается из organic MVP result.
+
+Gate пройден только если существует живой Pinterest Pin и его техническая сессия наблюдаема в выбранном инструменте аналитики. Если `utm_content` недоступен, отдельно решить, достаточно ли агрегированной атрибуции или требуется GA4.
+
+### Gate 1 — локальная детерминированная очередь
+
+**Гипотеза:** система правильно выбирает следующий вариант и не повторяет зарезервированные комбинации.
 
 Реализовать:
 
 - runtime validation JSON;
-- fair selection;
+- формальный variant-major order;
+- in-memory reservation внутри batch;
 - три intent slots;
 - Pin ID;
 - UTM generation;
-- atomic state write.
+- atomic state write;
+- остановку при `buffer_outcome_unknown`.
 
 Проверка:
 
 - unit tests проходят;
-- 40 товаров дают ровно 120 уникальных комбинаций;
-- повторный завершённый запуск не выбирает опубликованный вариант;
-- после 120 записей очередь пуста.
+- `products.length × 3` даёт ровно столько уникальных комбинаций;
+- fixture из 40 товаров даёт 120 комбинаций;
+- повторный завершённый запуск не выбирает записанный вариант;
+- после завершения каталога очередь пуста;
+- нарушенные state invariants отклоняются до API calls.
 
-### Этап 2 — OpenAI dry run
+### Gate 2 — один OpenAI dry run
 
-**Гипотеза:** OpenAI стабильно возвращает пригодный структурированный контент.
+**Гипотеза:** выбранная OpenAI model возвращает безопасный структурированный контент для одного товара.
 
 Проверка:
 
-- каждый ответ соответствует schema;
-- title, description и alt text находятся в заданных лимитах;
-- intents трёх типов различаются;
+- ответ соответствует зафиксированной schema;
+- title, description и alt text находятся в лимитах;
+- content использует только подтверждённые product facts;
+- refusal, incomplete output и rate limit обрабатываются;
 - `published.json` не меняется.
 
-### Этап 3 — один реальный Buffer Pin
+### Gate 3 — один автоматически созданный live Pin
 
-**Гипотеза:** Shopify image → Buffer → Pinterest работает технически.
-
-Проверка:
-
-- Pin появился в Buffer;
-- выбрана правильная Pinterest board;
-- title, description, image и destination URL корректны;
-- UTM параметры сохранились;
-- Buffer вернул post ID.
-
-### Этап 4 — tracking
-
-**Гипотеза:** переход с Pin виден как Pinterest organic session.
+**Гипотеза:** автоматизированный путь создаёт живой Pinterest Pin с основной UTM attribution.
 
 Проверка:
 
-- выполнить контролируемый переход через опубликованный Pin;
-- проверить конечный Shopify URL;
-- убедиться, что Shopify фиксирует Pinterest session;
-- проверить доступность `utm_campaign` и `utm_content` в текущем Shopify reporting.
+- Buffer вернул post ID;
+- Pin фактически появился в Pinterest;
+- выбрана правильная board;
+- content, image и destination URL корректны;
+- UTM сохранились;
+- технический результат не засчитывается как organic traffic.
 
-Если Shopify не показывает `utm_content`, сначала использовать Pinterest outbound clicks и Shopify Pinterest sessions. GA4 добавлять только после доказанного пробела измерения.
+### Gate 4 — малая выборка
 
-### Этап 5 — автоматический прогон
+**Гипотеза:** путь устойчив на нескольких Pins до масштабирования каталога.
 
-**Гипотеза:** процесс устойчиво создаёт около шести Pins в день без ручного запуска.
+Запустить 5–10 Pins и проверить:
+
+- live publication rate;
+- отсутствие известных дублей;
+- корректность state при partial failures;
+- обработку ambiguous Buffer outcome без слепого retry;
+- появление не-тестовых outbound clicks и Shopify sessions либо честный результат `inconclusive` при недостаточной экспозиции.
+
+### Gate 5 — GitHub Actions и полный каталог
+
+**Гипотеза:** процесс устойчиво создаёт около шести queue submissions в день без ручного запуска.
 
 Проверка:
 
 - workflow запускается три раза в день;
-- Buffer получает шесть Pins;
-- состояние сохраняется между GitHub Actions runs;
+- Buffer получает до шести Pins;
+- фактические live publications считаются отдельно от queue submissions;
+- состояние сохраняется и при частично успешном batch;
+- `GITHUB_TOKEN` может писать state с текущими repository rules;
 - отсутствуют известные повторные `productId + variant`;
 - ошибки видны как failed workflow.
 
-### Этап 6 — результат полного каталога
+### Gate 6 — результат полного каталога
 
 Техническое завершение MVP:
 
-- 120 уникальных Pins поставлены в очередь или опубликованы;
-- 120 уникальных UTM URLs;
+- `products.length × 3` уникальных Pins поставлены в очередь;
+- фактически опубликованные Pins посчитаны отдельно;
+- все UTM URLs уникальны;
 - нет известных дублей;
 - ссылки ведут на правильные Shopify products.
 
-Основная гипотеза подтверждена, если:
+Operational result и traffic result оцениваются отдельно.
 
-- Pinterest показывает ненулевые outbound clicks;
-- Shopify показывает хотя бы одну реальную Pinterest organic session.
+Основная traffic-гипотеза подтверждена только если существуют не-тестовые:
 
-Это подтверждает работоспособность traffic path, но ещё не доказывает product-market fit или коммерческую эффективность.
+- Pinterest outbound clicks;
+- Shopify Pinterest organic sessions.
+
+Контролируемый технический клик не считается подтверждением organic traffic. Нулевая экспозиция или слишком мало impressions дают результат `inconclusive`, а не автоматический failure.
 
 ## 12. Технические риски
 
@@ -344,11 +384,16 @@ GitHub cron может запускаться с задержкой. Реаль�
 
 Buffer требует `boardServiceId` при создании Pinterest Pin.
 
-### 12.3 JSON state в Git
+### 12.3 JSON state, partial batches и неопределённый Buffer outcome
 
-Между успешным Buffer API response и Git commit существует небольшой аварийный разрыв. Транзакционная exactly-once гарантия между Buffer и Git невозможна.
+Между Buffer и Git нет общей транзакции. Возможны два разных случая:
 
-Для MVP этот риск принимается и явно документируется. Supabase не добавляется заранее. Обычные завершённые повторные запуски не должны создавать дубли.
+- один Pin в batch принят, а следующий завершился ошибкой;
+- Buffer принял Pin, но клиент получил timeout и не знает результат.
+
+После каждого подтверждённого успеха state записывается локально. Workflow обязан сохранить этот state даже при последующей ошибке batch, а затем завершиться с исходным non-zero status.
+
+Неопределённый результат сохраняется как `buffer_outcome_unknown`. Новые submissions блокируются до ручной сверки; Buffer create mutation нельзя повторять вслепую. Supabase не добавляется заранее.
 
 ### 12.4 Одинаковые изображения
 
@@ -385,13 +430,13 @@ Buffer принимает только публично доступные media
 - MCP;
 - дополнительные social networks.
 
-## 14. Предварительные defaults для подтверждения
+## 14. Подтверждённые defaults
 
 1. Язык Pinterest content — английский.
 2. Публикация — Buffer `addToQueue`.
 3. Workflow — 3 запуска × 2 Pins.
 4. Состояние — commit `published.json` в default branch.
-5. Pin IDs — последовательные `pin_001 … pin_120`.
+5. Pin IDs — последовательные `pin_001`, `pin_002`, … без привязки к фиксированному размеру каталога.
 6. OpenAI model по умолчанию — `gpt-5-mini`, с возможностью изменить через env.
 7. Источник MVP — около 40 реальных товаров в `products.json` без Shopify Admin API.
 

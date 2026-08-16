@@ -12,7 +12,7 @@ Sales, product scoring, winner detection, product generation, and autonomous opt
 
 ## Current status
 
-The repository is in the planning/scaffolding phase. Read `PLAN.md` before changing code. Do not implement later stages unless the current stage has met its explicit verification criterion and the user has approved the next stage.
+The repository is at MVP Gate 0. Defaults are approved, but the full publisher is blocked until one live Pinterest Pin and its technical Shopify session are verified. Deterministic queue primitives and a read-only Buffer inspector are implemented. Read `PLAN.md` before changing code.
 
 ## Stage gate rule
 
@@ -21,6 +21,8 @@ Every change must answer:
 > Which concrete hypothesis does this change test?
 
 If the change is not necessary to test the current hypothesis, defer it.
+
+Before scaling, Gate 0 must distinguish three events: Buffer accepted the post, the Pin became live on Pinterest, and a marked technical click became observable in Shopify. A controlled technical click must never count as organic MVP traffic.
 
 ## MVP scope
 
@@ -118,24 +120,26 @@ The deterministic code chooses the variant type. AI generates the concrete searc
 
 `published.json` is the MVP source of truth for completed Buffer submissions. Each record should contain at least:
 
+- state-level campaign and ordered-catalog fingerprint;
 - `pinId`;
 - `productId`;
 - variant number and intent type;
 - generated search intent and content;
 - destination URL and image URL;
-- Buffer post ID;
-- Buffer state such as `buffer_queued`;
-- queue and scheduled timestamps when available.
+- Buffer post ID for confirmed `buffer_queued` records;
+- Buffer state such as `buffer_queued` or `buffer_outcome_unknown`;
+- `queuedAt` for confirmed queue submissions or `attemptedAt` for ambiguous outcomes;
+- scheduled timestamp when available.
 
 Do not describe a queued Buffer post as confirmed published on Pinterest. Persist state atomically with a temporary file and rename.
 
 ## Queue selection
 
-Use a deterministic fair queue: choose products with the fewest completed variants first, preserving `products.json` order as the tie-breaker. This produces the first Pin for all products before the second and third rounds.
+Use a deterministic variant-major queue: variant 1 for every product in `products.json` order, then variant 2, then variant 3. Reserve selected combinations in memory immediately so one batch cannot select a pair twice.
 
-A normal completed rerun must never submit an already recorded `productId + variant` pair.
+A normal completed rerun must never submit an already recorded `productId + variant` pair. Freeze product IDs, image URLs, catalog composition, and order during an active MVP run.
 
-Exactly-once delivery cannot be guaranteed transactionally across Buffer and a Git-committed JSON file. Keep this limitation explicit; do not introduce a database solely to hide it during the MVP.
+Exactly-once delivery cannot be guaranteed transactionally across Buffer and a Git-committed JSON file. Keep this limitation explicit; do not introduce a database solely to hide it during the MVP. An ambiguous create-post result must be recorded as `buffer_outcome_unknown`; block new submissions until it is reconciled instead of retrying blindly.
 
 ## UTM rules
 
@@ -226,7 +230,9 @@ The publishing workflow should:
 - use Node.js 22 and `npm ci`;
 - enforce a timeout;
 - never echo secrets;
-- commit only expected state changes after a successful run;
+- atomically update local state after each confirmed Buffer success;
+- commit expected state changes even when a later batch item fails, then preserve the original non-zero exit status;
+- never force-push state conflicts;
 - avoid triggering itself recursively.
 
 GitHub cron uses UTC and can be delayed. Buffer queue slots, not exact GitHub start times, should determine final Pinterest publication timing.
@@ -252,7 +258,7 @@ Critical tests should cover:
 
 - malformed and duplicate product data;
 - deterministic fair selection;
-- all 120 unique product/variant combinations;
+- `products.length × 3` unique product/variant combinations, including a 40-product/120-Pin fixture;
 - no selection after the catalog is complete;
 - stable unique Pin IDs;
 - UTM creation with and without existing query parameters;
@@ -266,7 +272,7 @@ Mock external APIs in automated tests. Never use production credentials in tests
 
 ## Error handling
 
-Fail before publishing when inputs or configuration are invalid. If Buffer rejects a Pin, do not record it as queued. If one item in a batch fails after earlier items succeeded, preserve the successful local state and exit non-zero so the failure remains visible.
+Fail before publishing when inputs or configuration are invalid. If Buffer explicitly rejects a Pin, do not record it as queued. If Buffer's outcome is ambiguous after submission, record `buffer_outcome_unknown` and halt for manual reconciliation. If one item in a batch fails after earlier items succeeded, preserve and commit the successful state, then exit non-zero so the failure remains visible.
 
 Logs should contain safe operational identifiers such as `pinId`, `productId`, and Buffer post ID, but no secrets.
 

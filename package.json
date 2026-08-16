@@ -1,0 +1,24 @@
+{
+  "name": "shopify-pinterest-flow",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Hypothesis-first Shopify to Pinterest traffic MVP for Kotkoa",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test tests/**/*.test.ts",
+    "queue:preview": "node --env-file-if-exists=.env --import tsx src/pinterest.ts preview",
+    "buffer:inspect": "node --env-file-if-exists=.env --import tsx src/pinterest.ts inspect-buffer"
+  },
+  "dependencies": {
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.1",
+    "tsx": "^4.23.12",
+    "typescript": "^6.0.3"
+  }
+}
