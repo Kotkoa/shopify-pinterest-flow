@@ -1,8 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { readFile, rename, writeFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
-import OpenAI from "openai";
-import { zodTextFormat } from "openai/helpers/zod";
+import { GoogleGenAI } from "@google/genai";
 import { z } from "zod";
 
 const BUFFER_API_URL = "https://api.buffer.com";
@@ -246,55 +245,49 @@ function buildPinContentPrompt(
 
 export class PinContentRefusalError extends Error {
   constructor(reason: string) {
-    super(`OpenAI refused to generate Pin content: ${reason}`);
+    super(`Gemini refused to generate Pin content: ${reason}`);
     this.name = "PinContentRefusalError";
   }
 }
 
 export class PinContentIncompleteError extends Error {
   constructor(reason: string) {
-    super(`OpenAI returned incomplete Pin content: ${reason}`);
+    super(`Gemini returned incomplete Pin content: ${reason}`);
     this.name = "PinContentIncompleteError";
   }
 }
 
+const pinContentJsonSchema = z.toJSONSchema(pinContentSchema);
+
 export async function generatePinContent(
-  client: OpenAI,
+  client: GoogleGenAI,
   product: Product,
   intentType: IntentType,
   model: string,
 ): Promise<PinContent> {
-  const response = await client.responses.parse({
+  const response = await client.models.generateContent({
     model,
-    input: [
-      {
-        role: "user",
-        content: buildPinContentPrompt(product.name, intentType),
-      },
-    ],
-    text: {
-      format: zodTextFormat(pinContentSchema, "pin_content"),
+    contents: buildPinContentPrompt(product.name, intentType),
+    config: {
+      responseMimeType: "application/json",
+      responseJsonSchema: pinContentJsonSchema,
     },
   });
 
-  if (response.status === "incomplete") {
-    throw new PinContentIncompleteError(
-      response.incomplete_details?.reason ?? "unknown reason",
-    );
+  const finishReason = response.candidates?.[0]?.finishReason;
+  if (finishReason === "SAFETY" || finishReason === "PROHIBITED_CONTENT") {
+    throw new PinContentRefusalError(finishReason);
+  }
+  if (finishReason && finishReason !== "STOP") {
+    throw new PinContentIncompleteError(finishReason);
   }
 
-  const firstOutput = response.output[0];
-  const firstContent =
-    firstOutput?.type === "message" ? firstOutput.content[0] : undefined;
-  if (firstContent?.type === "refusal") {
-    throw new PinContentRefusalError(firstContent.refusal);
+  const text = response.text;
+  if (text === undefined || text.trim() === "") {
+    throw new Error("Gemini response did not contain Pin content");
   }
 
-  if (response.output_parsed === null || response.output_parsed === undefined) {
-    throw new Error("OpenAI response did not contain parsed Pin content");
-  }
-
-  return pinContentSchema.parse(response.output_parsed);
+  return pinContentSchema.parse(JSON.parse(text));
 }
 
 export function parseProducts(input: unknown): Product[] {
@@ -694,10 +687,10 @@ async function openaiDryRunCommand(): Promise<void> {
   const state = parsePublishedState(await readJson("published.json"), products);
   const limit = positiveIntegerConfig("PINS_PER_RUN", "2");
   const campaign = process.env["UTM_CAMPAIGN"] ?? "pinterest_mvp";
-  const model = process.env["OPENAI_MODEL"] ?? "gpt-5-mini";
+  const model = process.env["GEMINI_MODEL"] ?? "gemini-3.6-flash";
   const candidates = selectCandidates(products, state, limit, campaign);
 
-  const client = new OpenAI({ apiKey: requiredConfig("OPENAI_API_KEY") });
+  const client = new GoogleGenAI({ apiKey: requiredConfig("GEMINI_API_KEY") });
 
   for (const candidate of candidates) {
     const content = await generatePinContent(

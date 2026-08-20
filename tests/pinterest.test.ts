@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { ZodError } from "zod";
-import type OpenAI from "openai";
+import type { GoogleGenAI } from "@google/genai";
 import {
   bufferGraphql,
   buildTrackingUrl,
@@ -544,10 +544,10 @@ test("inspectPinterestChannels discovers Pinterest boards and ignores other serv
   ]);
 });
 
-function mockOpenAiClient(
-  parse: (...args: unknown[]) => unknown,
-): OpenAI {
-  return { responses: { parse } } as unknown as OpenAI;
+function mockGeminiClient(
+  generateContent: (...args: unknown[]) => unknown,
+): GoogleGenAI {
+  return { models: { generateContent } } as unknown as GoogleGenAI;
 }
 
 test("generatePinContent returns validated content on success", async () => {
@@ -557,11 +557,10 @@ test("generatePinContent returns validated content on success", async () => {
     description: "A bright lemon-print pillow for a Mediterranean-style room.",
     altText: "Yellow lemon-print throw pillow on a linen sofa",
   };
-  const client = mockOpenAiClient(() =>
+  const client = mockGeminiClient(() =>
     Promise.resolve({
-      status: "completed",
-      output: [{ type: "message", content: [{ type: "output_text" }] }],
-      output_parsed: parsedContent,
+      text: JSON.stringify(parsedContent),
+      candidates: [{ finishReason: "STOP" }],
     }),
   );
 
@@ -569,59 +568,50 @@ test("generatePinContent returns validated content on success", async () => {
     client,
     products[0]!,
     "product_type",
-    "gpt-5-mini",
+    "gemini-2.5-flash",
   );
 
   assert.deepEqual(result, parsedContent);
 });
 
 test("generatePinContent throws PinContentRefusalError on refusal", async () => {
-  const client = mockOpenAiClient(() =>
+  const client = mockGeminiClient(() =>
     Promise.resolve({
-      status: "completed",
-      output: [
-        {
-          type: "message",
-          content: [{ type: "refusal", refusal: "policy violation" }],
-        },
-      ],
-      output_parsed: null,
+      text: undefined,
+      candidates: [{ finishReason: "SAFETY" }],
     }),
   );
 
   await assert.rejects(
-    generatePinContent(client, products[0]!, "product_type", "gpt-5-mini"),
+    generatePinContent(client, products[0]!, "product_type", "gemini-2.5-flash"),
     PinContentRefusalError,
   );
 });
 
 test("generatePinContent throws PinContentIncompleteError on incomplete status", async () => {
-  const client = mockOpenAiClient(() =>
+  const client = mockGeminiClient(() =>
     Promise.resolve({
-      status: "incomplete",
-      incomplete_details: { reason: "max_output_tokens" },
-      output: [],
-      output_parsed: null,
+      text: undefined,
+      candidates: [{ finishReason: "MAX_TOKENS" }],
     }),
   );
 
   await assert.rejects(
-    generatePinContent(client, products[0]!, "product_type", "gpt-5-mini"),
+    generatePinContent(client, products[0]!, "product_type", "gemini-2.5-flash"),
     PinContentIncompleteError,
   );
 });
 
 test("generatePinContent rejects output that fails local Zod validation", async () => {
-  const client = mockOpenAiClient(() =>
+  const client = mockGeminiClient(() =>
     Promise.resolve({
-      status: "completed",
-      output: [{ type: "message", content: [{ type: "output_text" }] }],
-      output_parsed: { searchIntent: "", title: "", description: "", altText: "" },
+      text: JSON.stringify({ searchIntent: "", title: "", description: "", altText: "" }),
+      candidates: [{ finishReason: "STOP" }],
     }),
   );
 
   await assert.rejects(
-    generatePinContent(client, products[0]!, "product_type", "gpt-5-mini"),
+    generatePinContent(client, products[0]!, "product_type", "gemini-2.5-flash"),
     ZodError,
   );
 });
