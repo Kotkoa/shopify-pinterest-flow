@@ -11,9 +11,11 @@
     "typecheck": "tsc --noEmit",
     "test": "tsx --test tests/**/*.test.ts",
     "queue:preview": "node --env-file-if-exists=.env --import tsx src/pinterest.ts preview",
-    "buffer:inspect": "node --env-file-if-exists=.env --import tsx src/pinterest.ts inspect-buffer"
+    "buffer:inspect": "node --env-file-if-exists=.env --import tsx src/pinterest.ts inspect-buffer",
+    "openai:dry-run": "node --env-file-if-exists=.env --import tsx src/pinterest.ts openai-dry-run"
   },
   "dependencies": {
+    "openai": "^7.5.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {

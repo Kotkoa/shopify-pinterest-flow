@@ -4,17 +4,21 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { ZodError } from "zod";
+import type OpenAI from "openai";
 import {
   bufferGraphql,
   buildTrackingUrl,
   createInitialState,
   fingerprintProducts,
   formatPinId,
+  generatePinContent,
   inspectPinterestChannels,
   intentTypeForVariant,
   nextPinNumber,
   parseProducts,
   parsePublishedState,
+  PinContentIncompleteError,
+  PinContentRefusalError,
   type PinRecord,
   type Product,
   type PublishedState,
@@ -538,4 +542,86 @@ test("inspectPinterestChannels discovers Pinterest boards and ignores other serv
       ],
     },
   ]);
+});
+
+function mockOpenAiClient(
+  parse: (...args: unknown[]) => unknown,
+): OpenAI {
+  return { responses: { parse } } as unknown as OpenAI;
+}
+
+test("generatePinContent returns validated content on success", async () => {
+  const parsedContent = {
+    searchIntent: "citrus throw pillow",
+    title: "Mediterranean Lemon Pillow",
+    description: "A bright lemon-print pillow for a Mediterranean-style room.",
+    altText: "Yellow lemon-print throw pillow on a linen sofa",
+  };
+  const client = mockOpenAiClient(() =>
+    Promise.resolve({
+      status: "completed",
+      output: [{ type: "message", content: [{ type: "output_text" }] }],
+      output_parsed: parsedContent,
+    }),
+  );
+
+  const result = await generatePinContent(
+    client,
+    products[0]!,
+    "product_type",
+    "gpt-5-mini",
+  );
+
+  assert.deepEqual(result, parsedContent);
+});
+
+test("generatePinContent throws PinContentRefusalError on refusal", async () => {
+  const client = mockOpenAiClient(() =>
+    Promise.resolve({
+      status: "completed",
+      output: [
+        {
+          type: "message",
+          content: [{ type: "refusal", refusal: "policy violation" }],
+        },
+      ],
+      output_parsed: null,
+    }),
+  );
+
+  await assert.rejects(
+    generatePinContent(client, products[0]!, "product_type", "gpt-5-mini"),
+    PinContentRefusalError,
+  );
+});
+
+test("generatePinContent throws PinContentIncompleteError on incomplete status", async () => {
+  const client = mockOpenAiClient(() =>
+    Promise.resolve({
+      status: "incomplete",
+      incomplete_details: { reason: "max_output_tokens" },
+      output: [],
+      output_parsed: null,
+    }),
+  );
+
+  await assert.rejects(
+    generatePinContent(client, products[0]!, "product_type", "gpt-5-mini"),
+    PinContentIncompleteError,
+  );
+});
+
+test("generatePinContent rejects output that fails local Zod validation", async () => {
+  const client = mockOpenAiClient(() =>
+    Promise.resolve({
+      status: "completed",
+      output: [{ type: "message", content: [{ type: "output_text" }] }],
+      output_parsed: { searchIntent: "", title: "", description: "", altText: "" },
+    }),
+  );
+
+  await assert.rejects(
+    generatePinContent(client, products[0]!, "product_type", "gpt-5-mini"),
+    ZodError,
+  );
 });

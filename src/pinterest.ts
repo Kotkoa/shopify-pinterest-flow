@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import { readFile, rename, writeFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
+import OpenAI from "openai";
+import { zodTextFormat } from "openai/helpers/zod";
 import { z } from "zod";
 
 const BUFFER_API_URL = "https://api.buffer.com";
@@ -206,6 +208,94 @@ export type PinCandidate = {
   intentType: IntentType;
   destinationUrl: string;
 };
+
+export const pinContentSchema = z
+  .object({
+    searchIntent: z.string().trim().min(1).max(100),
+    title: z.string().trim().min(1).max(100),
+    description: z.string().trim().min(1).max(800),
+    altText: z.string().trim().min(1).max(500),
+  })
+  .strict();
+
+export type PinContent = z.infer<typeof pinContentSchema>;
+
+const INTENT_ANGLE_GUIDANCE: Record<IntentType, string> = {
+  product_type:
+    "Focus on what the product concretely is (category, material, form).",
+  theme_style:
+    "Focus on its visual motif, aesthetic, or decorating style.",
+  use_case:
+    "Focus on a room, occasion, recipient, or intended use for the product.",
+};
+
+function buildPinContentPrompt(
+  productName: string,
+  intentType: IntentType,
+): string {
+  return [
+    "Write Pinterest Pin content in English for a Shopify product.",
+    `Product name: ${productName}`,
+    `Intent angle: ${intentType}. ${INTENT_ANGLE_GUIDANCE[intentType]}`,
+    "Keep this angle meaningfully distinct from the other two possible angles (product_type, theme_style, use_case).",
+    "Do not make claims that are not supported by the product name.",
+    "Do not stuff keywords.",
+    "Return only the requested fields: searchIntent, title, description, altText.",
+  ].join("\n");
+}
+
+export class PinContentRefusalError extends Error {
+  constructor(reason: string) {
+    super(`OpenAI refused to generate Pin content: ${reason}`);
+    this.name = "PinContentRefusalError";
+  }
+}
+
+export class PinContentIncompleteError extends Error {
+  constructor(reason: string) {
+    super(`OpenAI returned incomplete Pin content: ${reason}`);
+    this.name = "PinContentIncompleteError";
+  }
+}
+
+export async function generatePinContent(
+  client: OpenAI,
+  product: Product,
+  intentType: IntentType,
+  model: string,
+): Promise<PinContent> {
+  const response = await client.responses.parse({
+    model,
+    input: [
+      {
+        role: "user",
+        content: buildPinContentPrompt(product.name, intentType),
+      },
+    ],
+    text: {
+      format: zodTextFormat(pinContentSchema, "pin_content"),
+    },
+  });
+
+  if (response.status === "incomplete") {
+    throw new PinContentIncompleteError(
+      response.incomplete_details?.reason ?? "unknown reason",
+    );
+  }
+
+  const firstOutput = response.output[0];
+  const firstContent =
+    firstOutput?.type === "message" ? firstOutput.content[0] : undefined;
+  if (firstContent?.type === "refusal") {
+    throw new PinContentRefusalError(firstContent.refusal);
+  }
+
+  if (response.output_parsed === null || response.output_parsed === undefined) {
+    throw new Error("OpenAI response did not contain parsed Pin content");
+  }
+
+  return pinContentSchema.parse(response.output_parsed);
+}
 
 export function parseProducts(input: unknown): Product[] {
   return productsSchema.parse(input);
@@ -593,6 +683,49 @@ async function previewQueue(): Promise<void> {
   );
 }
 
+function requiredConfig(name: string): string {
+  const value = process.env[name] ?? "";
+  if (value.trim() === "") throw new Error(`${name} is required`);
+  return value;
+}
+
+async function openaiDryRunCommand(): Promise<void> {
+  const products = parseProducts(await readJson("products.json"));
+  const state = parsePublishedState(await readJson("published.json"), products);
+  const limit = positiveIntegerConfig("PINS_PER_RUN", "2");
+  const campaign = process.env["UTM_CAMPAIGN"] ?? "pinterest_mvp";
+  const model = process.env["OPENAI_MODEL"] ?? "gpt-5-mini";
+  const candidates = selectCandidates(products, state, limit, campaign);
+
+  const client = new OpenAI({ apiKey: requiredConfig("OPENAI_API_KEY") });
+
+  for (const candidate of candidates) {
+    const content = await generatePinContent(
+      client,
+      candidate.product,
+      candidate.intentType,
+      model,
+    );
+
+    console.log(
+      JSON.stringify(
+        {
+          pinId: candidate.pinId,
+          productId: candidate.product.id,
+          variant: candidate.variant,
+          intentType: candidate.intentType,
+          searchIntent: content.searchIntent,
+          title: content.title,
+          description: content.description,
+          altText: content.altText,
+        },
+        null,
+        2,
+      ),
+    );
+  }
+}
+
 async function inspectBufferCommand(): Promise<void> {
   if (process.env["CI"] === "true") {
     throw new Error("buffer:inspect is a local-only command and cannot run in CI");
@@ -633,9 +766,12 @@ async function main(): Promise<void> {
     case "inspect-buffer":
       await inspectBufferCommand();
       return;
+    case "openai-dry-run":
+      await openaiDryRunCommand();
+      return;
     default:
       throw new Error(
-        "Usage: npm run queue:preview | npm run buffer:inspect",
+        "Usage: npm run queue:preview | npm run buffer:inspect | npm run openai:dry-run",
       );
   }
 }
